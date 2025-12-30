@@ -44,15 +44,30 @@ Optional:
 
 ## Mock tool calls
 
-Not working for now. Enable tool call simulation in `/v1/messages` responses:
+Tool call simulation is enabled by default. The server returns `tool_use` blocks
+when request includes `tools`, and keeps returning tool calls indefinitely.
+
+To disable:
 
 ```bash
-export MOCK_TOOL_CALLS=1
+export MOCK_TOOL_CALLS=0
 ```
 
-When enabled, the server only returns tool_use blocks if the request includes
-`tools` and does not already include any `tool_result`. After the client sends
-tool results, the server returns the normal text reply.
+## Custom Bash commands
 
-Tool commands are intentionally safe defaults. If you need different commands,
-edit `mockToolUses` in `main.go`.
+By default, the Bash tool returns `echo 喵喵喵喵~`. You can provide a file with
+custom commands (one per line), and the server will randomly pick one each time:
+
+```bash
+export BASH_COMMANDS_FILE=./bash_commands.txt
+```
+
+Example file format:
+
+```text
+# Comments start with #
+echo "Hello World"
+ls -la
+pwd
+date
+```

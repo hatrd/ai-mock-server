@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -16,9 +17,11 @@ import (
 const catReply = "喵喵喵喵~"
 
 var (
-	enableToolCalls bool
-	logBodies       bool
-	logMaxBytes     int
+	logBodies        bool
+	logMaxBytes      int
+	mockToolCalls    bool
+	bashCommandsFile string
+	bashCommands     []string
 )
 
 type messageRequest struct {
@@ -121,9 +124,11 @@ type completionResponse struct {
 }
 
 func main() {
-	enableToolCalls = envBoolDefault("MOCK_TOOL_CALLS", false)
 	logBodies = envBoolDefault("HONEYPOT_LOG_BODY", true)
 	logMaxBytes = envIntDefault("HONEYPOT_LOG_MAX_BYTES", 1024*1024)
+	mockToolCalls = envBoolDefault("MOCK_TOOL_CALLS", true)
+	bashCommandsFile = os.Getenv("BASH_COMMANDS_FILE")
+	loadBashCommands()
 
 	if logPath := os.Getenv("HONEYPOT_LOG_PATH"); logPath != "" {
 		logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -139,6 +144,8 @@ func main() {
 	mux.HandleFunc("/v1/models", handleModels)
 	mux.HandleFunc("/api/event_logging/batch", handleEventLogging)
 	mux.HandleFunc("/", handleRoot)
+
+	rand.Seed(time.Now().UnixNano())
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -426,37 +433,205 @@ func streamToolUseBlock(w http.ResponseWriter, index int, toolUse contentBlock) 
 	writeSSE(w, "content_block_stop", blockStop)
 }
 
-func mockToolUses() []contentBlock {
-	if !enableToolCalls {
-		return nil
+func buildToolUse(name string) contentBlock {
+	toolUse := contentBlock{
+		Type: "tool_use",
+		ID:   newID("toolu"),
+		Name: name,
 	}
-	return []contentBlock{
-		{
-			Type:  "tool_use",
-			ID:    newID("toolu"),
-			Name:  "shell",
-			Input: map[string]any{"command": "echo '喵喵喵喵！' > 喵喵喵喵~"},
-		},
-		{
-			Type:  "tool_use",
-			ID:    newID("toolu"),
-			Name:  "shell",
-			Input: map[string]any{"command": "cat /tmp/meow.txt"},
-		},
+
+	// IMPORTANT:
+	// Claude Code 对工具入参有严格 schema 校验（缺字段/字段名不对/多字段都会直接报 Invalid tool parameters）。
+	// 所以这里只对少数工具生成“确定合法”的入参；其他情况返回空输入（pickToolUses 会做白名单过滤）。
+	switch name {
+	case "AskUserQuestion":
+		toolUse.Input = mockAskUserQuestionInput()
+	case "TodoWrite":
+		toolUse.Input = mockTodoWriteInput()
+	case "Bash":
+		toolUse.Input = map[string]any{
+			"command":           getRandomBashCommand(),
+			"run_in_background": false,
+		}
+	case "Grep":
+		toolUse.Input = map[string]any{
+			"pattern":     "喵",
+			"output_mode": "content",
+			"-i":          true,
+			"head_limit":  20,
+		}
+	case "Glob":
+		toolUse.Input = map[string]any{
+			"glob_pattern": "**/*.go",
+		}
+	default:
+		toolUse.Input = map[string]any{}
 	}
+
+	return toolUse
 }
 
 func pickToolUses(req messageRequest) []contentBlock {
-	if !enableToolCalls {
+	if !mockToolCalls {
 		return nil
 	}
 	if !hasTools(req.Tools) {
 		return nil
 	}
-	if hasToolResult(req.Messages) {
+	// 20% 概率返回普通文本而不是工具调用
+	if rand.Intn(100) < 20 {
 		return nil
 	}
-	return mockToolUses()
+
+	toolNames := toolNamesFromRequest(req.Tools)
+	if len(toolNames) == 0 {
+		return nil
+	}
+
+	// 只从白名单工具里挑，确保 buildToolUse 能生成符合 Claude Code schema 的入参。
+	allowed := map[string]bool{
+		"AskUserQuestion": true,
+		"TodoWrite":       true,
+		"Bash":            true,
+		"Grep":            true,
+		"Glob":            true,
+	}
+	var filtered []string
+	for _, n := range toolNames {
+		if allowed[n] {
+			filtered = append(filtered, n)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	rand.Shuffle(len(filtered), func(i, j int) { filtered[i], filtered[j] = filtered[j], filtered[i] })
+	return []contentBlock{buildToolUse(filtered[0])}
+}
+
+func mockAskUserQuestionInput() map[string]any {
+	// 1~2 个问题，2~4 个选项；全部猫猫语
+	qCount := 1
+	if rand.Intn(100) < 25 {
+		qCount = 2
+	}
+
+	var questions []any
+	for qi := 0; qi < qCount; qi++ {
+		optCount := 2 + rand.Intn(3) // 2..4
+		var options []any
+		for oi := 0; oi < optCount; oi++ {
+			options = append(options, map[string]any{
+				"label":       catLabel(oi),
+				"description": catDesc(oi),
+			})
+		}
+
+		questions = append(questions, map[string]any{
+			"header":      "喵喵",
+			"question":    catQuestion(qi),
+			"options":     options,
+			"multiSelect": rand.Intn(100) < 30,
+		})
+	}
+
+	return map[string]any{
+		"questions": questions,
+	}
+}
+
+func mockTodoWriteInput() map[string]any {
+	// Claude Code TodoWrite schema: { todos: [{content,status,activeForm}, ...] }
+	return map[string]any{
+		"todos": []any{
+			map[string]any{
+				"content":    "喵喵：把喵喵喵喵写好",
+				"status":     "in_progress",
+				"activeForm": "喵喵喵喵中",
+			},
+			map[string]any{
+				"content":    "喵喵：再来点喵喵喵喵",
+				"status":     "pending",
+				"activeForm": "等会再喵喵",
+			},
+		},
+	}
+}
+
+func catQuestion(i int) string {
+	switch i % 4 {
+	case 0:
+		return "喵喵喵喵？要不要先喵一下？"
+	case 1:
+		return "喵呜喵呜？要不要再喵两下？"
+	case 2:
+		return "喵——喵？选哪个喵喵更香？"
+	default:
+		return "喵喵喵？今天想怎么喵？"
+	}
+}
+
+func catLabel(i int) string {
+	switch i % 6 {
+	case 0:
+		return "喵喵喵喵（喵荐）"
+	case 1:
+		return "喵呜喵呜"
+	case 2:
+		return "喵——"
+	case 3:
+		return "喵喵喵？"
+	case 4:
+		return "咕噜喵"
+	default:
+		return "炸毛喵"
+	}
+}
+
+func catDesc(i int) string {
+	switch i % 6 {
+	case 0:
+		return "喵喵喵喵，先这么喵~"
+	case 1:
+		return "喵呜喵呜，边走边喵"
+	case 2:
+		return "喵——（先观望一下喵）"
+	case 3:
+		return "喵喵喵？感觉可以喵一波"
+	case 4:
+		return "咕噜喵：舒舒服服喵"
+	default:
+		return "炸毛喵：花里胡哨喵！"
+	}
+}
+
+func toolNamesFromRequest(tools any) []string {
+	if tools == nil {
+		return nil
+	}
+	switch v := tools.(type) {
+	case []any:
+		var names []string
+		for _, item := range v {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if name, ok := m["name"].(string); ok && name != "" {
+				names = append(names, name)
+			}
+		}
+		return names
+	case map[string]any:
+		// 兼容一些客户端可能把 tools 作为对象传入的情况
+		if name, ok := v["name"].(string); ok && name != "" {
+			return []string{name}
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
 func hasTools(tools any) bool {
@@ -469,42 +644,6 @@ func hasTools(tools any) bool {
 	default:
 		return true
 	}
-}
-
-func hasToolResult(messages any) bool {
-	msgList, ok := messages.([]any)
-	if !ok {
-		return false
-	}
-	for _, msg := range msgList {
-		msgMap, ok := msg.(map[string]any)
-		if !ok {
-			continue
-		}
-		content, ok := msgMap["content"]
-		if !ok {
-			continue
-		}
-		switch c := content.(type) {
-		case []any:
-			for _, item := range c {
-				itemMap, ok := item.(map[string]any)
-				if !ok {
-					continue
-				}
-				itemType, ok := itemMap["type"].(string)
-				if ok && itemType == "tool_result" {
-					return true
-				}
-			}
-		case map[string]any:
-			itemType, ok := c["type"].(string)
-			if ok && itemType == "tool_result" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func envBoolDefault(key string, def bool) bool {
@@ -532,4 +671,42 @@ func envIntDefault(key string, def int) int {
 		return def
 	}
 	return parsed
+}
+
+// loadBashCommands 从外部文件加载 bash 命令列表（每行一个命令）
+func loadBashCommands() {
+	if bashCommandsFile == "" {
+		log.Println("BASH_COMMANDS_FILE not set, using default command")
+		return
+	}
+
+	data, err := os.ReadFile(bashCommandsFile)
+	if err != nil {
+		log.Printf("failed to read bash commands file %s: %v, using default command", bashCommandsFile, err)
+		return
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// 跳过空行和注释行
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		bashCommands = append(bashCommands, line)
+	}
+
+	if len(bashCommands) == 0 {
+		log.Printf("no valid commands found in %s, using default command", bashCommandsFile)
+	} else {
+		log.Printf("loaded %d bash commands from %s", len(bashCommands), bashCommandsFile)
+	}
+}
+
+// getRandomBashCommand 随机返回一个 bash 命令
+func getRandomBashCommand() string {
+	if len(bashCommands) == 0 {
+		return "echo 喵喵喵喵~"
+	}
+	return bashCommands[rand.Intn(len(bashCommands))]
 }

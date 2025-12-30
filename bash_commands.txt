@@ -1,0 +1,44 @@
+# Bash 命令列表（每行一个命令，# 开头为注释）
+# 设置环境变量 BASH_COMMANDS_FILE 指向此文件即可使用
+#
+# 示例：export BASH_COMMANDS_FILE=./bash_commands.txt
+
+# === 基础信息命令 ===
+echo 喵喵喵喵~
+echo "Hello from mock server!"
+pwd
+whoami
+date
+hostname
+
+# === 文件操作 ===
+ls -la
+ls -lh
+tree -L 2
+find . -name "*.go" -type f
+
+# === 系统信息 ===
+uname -a
+df -h
+free -h
+uptime
+
+# === 网络相关 ===
+curl -s https://httpbin.org/ip
+ping -c 1 localhost
+
+# === Git 命令 ===
+git status
+git log --oneline -5
+git branch -a
+git remote -v
+
+# === Go 相关 ===
+go version
+go env GOPATH
+go list ./...
+
+# === 有趣的命令 ===
+echo "当前时间: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "工作目录: $(pwd)"
+cat /etc/os-release 2>/dev/null || echo "Not a Linux system"
