@@ -24,10 +24,32 @@ Supported endpoints:
 - `POST /v1/messages` (streaming and non-streaming)
 - `POST /v1/complete`
 - `GET /v1/models`
+- `POST /v1/responses` (OpenAI Responses API; streaming and non-streaming)
+- `POST /v1/chat/completions` (OpenAI Chat Completions; streaming and non-streaming)
 - `POST /api/event_logging/batch` (no-op, returns 204)
 
 If you only see `/api/event_logging/batch` in logs and no model replies,
 double-check that Claude Code is using the mock server as the API base URL.
+
+## Use with OpenAI Codex (Responses API)
+
+Most OpenAI clients expect the base URL to include `/v1`:
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8080/v1
+export OPENAI_API_KEY=anything
+```
+
+For Codex CLI specifically, you can point a temporary model provider at this server:
+
+```bash
+codex exec \
+  -c model_provider="mock" \
+  -c model_providers.mock.name="mock" \
+  -c model_providers.mock.base_url="http://localhost:8080/v1" \
+  -c model_providers.mock.wire_api="responses" \
+  "hi"
+```
 
 ## Honeypot logging
 
