@@ -123,6 +123,95 @@ type completionResponse struct {
 	LogID      string `json:"log_id"`
 }
 
+// --- OpenAI (Codex) compatible types ---
+
+type openAIResponsesRequest struct {
+	Model  string `json:"model"`
+	Input  any    `json:"input"`
+	Stream bool   `json:"stream"`
+	Tools  any    `json:"tools"`
+}
+
+type openAIResponse struct {
+	ID      string               `json:"id"`
+	Object  string               `json:"object"`
+	Created int64                `json:"created"`
+	Model   string               `json:"model"`
+	Status  string               `json:"status"`
+	Output  []openAIOutputItem   `json:"output"`
+	Usage   *openAIResponseUsage `json:"usage,omitempty"`
+	Error   *openAIResponseError `json:"error,omitempty"`
+}
+
+type openAIOutputItem struct {
+	ID      string               `json:"id,omitempty"`
+	Type    string               `json:"type"`
+	Role    string               `json:"role,omitempty"`
+	Content []openAIContentBlock `json:"content"`
+}
+
+type openAIContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+type openAIResponseUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+type openAIResponseError struct {
+	Message string `json:"message"`
+	Type    string `json:"type,omitempty"`
+	Code    string `json:"code,omitempty"`
+}
+
+type openAIModelsListResponse struct {
+	Object string        `json:"object"`
+	Data   []openAIModel `json:"data"`
+}
+
+type openAIModel struct {
+	ID      string `json:"id"`
+	Object  string `json:"object,omitempty"`
+	Created int64  `json:"created,omitempty"`
+	OwnedBy string `json:"owned_by,omitempty"`
+}
+
+type openAIChatCompletionsRequest struct {
+	Model    string `json:"model"`
+	Messages any    `json:"messages"`
+	Stream   bool   `json:"stream"`
+}
+
+type openAIChatCompletionResponse struct {
+	ID      string               `json:"id"`
+	Object  string               `json:"object"`
+	Created int64                `json:"created"`
+	Model   string               `json:"model"`
+	Choices []openAIChatChoice   `json:"choices"`
+	Usage   openAIChatUsage      `json:"usage,omitempty"`
+	Error   *openAIResponseError `json:"error,omitempty"`
+}
+
+type openAIChatChoice struct {
+	Index        int               `json:"index"`
+	Message      openAIChatMessage `json:"message"`
+	FinishReason string            `json:"finish_reason"`
+}
+
+type openAIChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type openAIChatUsage struct {
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
+}
+
 func main() {
 	logBodies = envBoolDefault("HONEYPOT_LOG_BODY", true)
 	logMaxBytes = envIntDefault("HONEYPOT_LOG_MAX_BYTES", 1024*1024)
@@ -142,6 +231,13 @@ func main() {
 	mux.HandleFunc("/v1/messages", handleMessages)
 	mux.HandleFunc("/v1/complete", handleComplete)
 	mux.HandleFunc("/v1/models", handleModels)
+	mux.HandleFunc("/v1/models/", handleModelDetail)
+	mux.HandleFunc("/v1/responses", handleOpenAIResponses)
+	mux.HandleFunc("/v1/chat/completions", handleOpenAIChatCompletions)
+	mux.HandleFunc("/responses", handleOpenAIResponses)
+	mux.HandleFunc("/chat/completions", handleOpenAIChatCompletions)
+	mux.HandleFunc("/models", handleModels)
+	mux.HandleFunc("/models/", handleModelDetail)
 	mux.HandleFunc("/api/event_logging/batch", handleEventLogging)
 	mux.HandleFunc("/", handleRoot)
 
@@ -152,7 +248,7 @@ func main() {
 		port = "8080"
 	}
 	addr := ":" + port
-	log.Printf("Anthropic mock listening on %s", addr)
+	log.Printf("AI mock (Anthropic+OpenAI) listening on %s", addr)
 	if err := http.ListenAndServe(addr, logging(mux)); err != nil {
 		log.Fatal(err)
 	}
@@ -164,7 +260,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"status":"ok","message":"anthropic mock: replies with cat sounds"}`))
+	_, _ = w.Write([]byte(`{"status":"ok","message":"ai mock: replies with cat sounds"}`))
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -173,7 +269,49 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"data":[{"id":"claude-mock","type":"model"}]}`))
+
+	// Keep Claude Code compatibility, but also support OpenAI-style model listing.
+	if isAnthropicRequest(r) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-mock","type":"model"}]}`))
+		return
+	}
+
+	resp := openAIModelsListResponse{
+		Object: "list",
+		Data: []openAIModel{
+			{ID: "codex-mock", Object: "model", Created: time.Now().Unix(), OwnedBy: "ai-mock-server"},
+		},
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func handleModelDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Anthropic doesn't expose model detail on this route; return 404 to avoid surprises.
+	if isAnthropicRequest(r) {
+		http.NotFound(w, r)
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/v1/models/")
+	id = strings.TrimPrefix(id, "/models/")
+	if id == "" || strings.Contains(id, "/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	resp := openAIModel{
+		ID:      id,
+		Object:  "model",
+		Created: time.Now().Unix(),
+		OwnedBy: "ai-mock-server",
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -326,12 +464,265 @@ func handleEventLogging(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	logRequestBody(r)
+
+	var req openAIResponsesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "codex-mock"
+	}
+
+	respID := newID("resp")
+	created := time.Now().Unix()
+	msgID := newID("msg")
+
+	finalResp := openAIResponse{
+		ID:      respID,
+		Object:  "response",
+		Created: created,
+		Model:   model,
+		Status:  "completed",
+		Output: []openAIOutputItem{
+			{
+				ID:   msgID,
+				Type: "message",
+				Role: "assistant",
+				Content: []openAIContentBlock{
+					{Type: "output_text", Text: catReply},
+				},
+			},
+		},
+		Usage: &openAIResponseUsage{InputTokens: 0, OutputTokens: 0, TotalTokens: 0},
+	}
+
+	if req.Stream {
+		streamOpenAIResponse(w, finalResp)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(finalResp)
+}
+
+func streamOpenAIResponse(w http.ResponseWriter, finalResp openAIResponse) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	createdResp := finalResp
+	createdResp.Status = "in_progress"
+	createdResp.Output = []openAIOutputItem{}
+	createdResp.Usage = nil
+
+	seq := 0
+	nextSeq := func() int {
+		n := seq
+		seq++
+		return n
+	}
+
+	outputIndex := 0
+	contentIndex := 0
+	itemID := ""
+	if len(finalResp.Output) > 0 {
+		itemID = finalResp.Output[0].ID
+	}
+
+	writeSSE(w, "response.created", map[string]any{
+		"type":            "response.created",
+		"sequence_number": nextSeq(),
+		"response":        createdResp,
+	})
+
+	// Build up an output item + content part stream, matching the Responses API SSE shape.
+	writeSSE(w, "response.output_item.added", map[string]any{
+		"type":            "response.output_item.added",
+		"sequence_number": nextSeq(),
+		"output_index":    outputIndex,
+		"item": openAIOutputItem{
+			ID:      itemID,
+			Type:    "message",
+			Role:    "assistant",
+			Content: []openAIContentBlock{},
+		},
+	})
+
+	writeSSE(w, "response.content_part.added", map[string]any{
+		"type":            "response.content_part.added",
+		"sequence_number": nextSeq(),
+		"item_id":         itemID,
+		"output_index":    outputIndex,
+		"content_index":   contentIndex,
+		"part": openAIContentBlock{
+			Type: "output_text",
+			Text: "",
+		},
+	})
+
+	writeSSE(w, "response.output_text.delta", map[string]any{
+		"type":            "response.output_text.delta",
+		"sequence_number": nextSeq(),
+		"item_id":         itemID,
+		"output_index":    outputIndex,
+		"content_index":   contentIndex,
+		"delta":           catReply,
+	})
+	writeSSE(w, "response.output_text.done", map[string]any{
+		"type":            "response.output_text.done",
+		"sequence_number": nextSeq(),
+		"item_id":         itemID,
+		"output_index":    outputIndex,
+		"content_index":   contentIndex,
+		"text":            catReply,
+	})
+
+	if len(finalResp.Output) > 0 {
+		writeSSE(w, "response.output_item.done", map[string]any{
+			"type":            "response.output_item.done",
+			"sequence_number": nextSeq(),
+			"output_index":    outputIndex,
+			"item":            finalResp.Output[0],
+		})
+	}
+
+	writeSSE(w, "response.completed", map[string]any{
+		"type":            "response.completed",
+		"sequence_number": nextSeq(),
+		"response":        finalResp,
+	})
+
+	flusher.Flush()
+}
+
+func handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	logRequestBody(r)
+
+	var req openAIChatCompletionsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = "codex-mock"
+	}
+
+	if req.Stream {
+		streamOpenAIChatCompletions(w, model)
+		return
+	}
+
+	resp := openAIChatCompletionResponse{
+		ID:      newID("chatcmpl"),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []openAIChatChoice{
+			{
+				Index: 0,
+				Message: openAIChatMessage{
+					Role:    "assistant",
+					Content: catReply,
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: openAIChatUsage{PromptTokens: 0, CompletionTokens: 0, TotalTokens: 0},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func streamOpenAIChatCompletions(w http.ResponseWriter, model string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	id := newID("chatcmpl")
+	created := time.Now().Unix()
+
+	writeSSEData(w, map[string]any{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []any{
+			map[string]any{
+				"index": 0,
+				"delta": map[string]any{
+					"role":    "assistant",
+					"content": catReply,
+				},
+				"finish_reason": nil,
+			},
+		},
+	})
+
+	writeSSEData(w, map[string]any{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []any{
+			map[string]any{
+				"index":         0,
+				"delta":         map[string]any{},
+				"finish_reason": "stop",
+			},
+		},
+	})
+
+	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
 func writeSSE(w http.ResponseWriter, event string, payload any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
 	_, _ = fmt.Fprintf(w, "event: %s\n", event)
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func writeSSEData(w http.ResponseWriter, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
@@ -671,6 +1062,22 @@ func envIntDefault(key string, def int) int {
 		return def
 	}
 	return parsed
+}
+
+func isAnthropicRequest(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("anthropic-version")) != "" {
+		return true
+	}
+	if strings.TrimSpace(r.Header.Get("anthropic-beta")) != "" {
+		return true
+	}
+	// Fallback heuristic for clients that only send Anthropic's `x-api-key`.
+	// Avoid misclassifying OpenAI-style clients/proxies that also inject `x-api-key`
+	// but use `Authorization: Bearer ...` for auth.
+	if strings.TrimSpace(r.Header.Get("x-api-key")) != "" && strings.TrimSpace(r.Header.Get("authorization")) == "" {
+		return true
+	}
+	return false
 }
 
 // loadBashCommands 从外部文件加载 bash 命令列表（每行一个命令）
